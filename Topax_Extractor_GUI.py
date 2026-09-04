@@ -436,10 +436,11 @@ class _App:
         ttk.Label(frm_status, textvariable=self._v_status).pack(side=tk.LEFT)
 
         self._v_pct = tk.DoubleVar(value=0.0)
-        ttk.Progressbar(
+        self._progressbar = ttk.Progressbar(
             frm_status, variable=self._v_pct,
             maximum=100, length=300, mode='determinate',
-        ).pack(side=tk.RIGHT, padx=4)
+        )
+        self._progressbar.pack(side=tk.RIGHT, padx=4)
 
         # ── Run log ───────────────────────────────────────────────────────────
         frm_log = ttk.LabelFrame(self.root, text="Run Log", padding=4)
@@ -859,6 +860,16 @@ class _App:
         self._btn_run.configure(state=tk.NORMAL)
         self._btn_stop.configure(state=tk.DISABLED)
 
+    def _set_busy(self, active: bool):
+        """Toggle the shared progress bar between an animated 'busy' spinner
+        (startup/discovery, before we know a total) and normal determinate mode."""
+        if active:
+            self._progressbar.configure(mode='indeterminate')
+            self._progressbar.start(12)
+        else:
+            self._progressbar.stop()
+            self._progressbar.configure(mode='determinate')
+
     def _on_run_plot_script(self, script_path: Path, button: ttk.Button, build_args):
         """Launch a sibling plotting script as an independent subprocess with
         GUI-supplied CLI args, streaming its stdout/stderr into the Run Log
@@ -876,9 +887,11 @@ class _App:
         button.configure(state=tk.DISABLED)
         cmd = [sys.executable, str(script_path)] + extra_args
         self._log(f"\n{'─' * 58}\nRunning: {' '.join(cmd)}\n{'─' * 58}")
-        self._set_ui(pct=0.0, status=f"Running {script_path.name}…")
+        self._v_status.set(f"Running {script_path.name}… (starting up)")
+        self._set_busy(True)
 
         def _stream():
+            busy = True
             try:
                 proc = subprocess.Popen(
                     cmd,
@@ -889,6 +902,9 @@ class _App:
                     line = line.rstrip('\n')
                     progress_match = re.match(r'^PROGRESS (\d+)/(\d+)$', line.strip())
                     if progress_match:
+                        if busy:
+                            self.root.after(0, lambda: self._set_busy(False))
+                            busy = False
                         done, total = int(progress_match.group(1)), int(progress_match.group(2))
                         pct = (done / total * 100) if total else 0
                         self._set_ui(pct=pct, status=f"{script_path.name}: {done} / {total}…")
@@ -900,6 +916,8 @@ class _App:
             except Exception as exc:
                 self._log(f"ERROR launching {script_path.name}: {exc}")
             finally:
+                if busy:
+                    self.root.after(0, lambda: self._set_busy(False))
                 self.root.after(0, lambda: button.configure(state=tk.NORMAL))
 
         threading.Thread(target=_stream, daemon=True).start()

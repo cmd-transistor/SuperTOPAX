@@ -517,6 +517,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    print("Starting topax_wafer_sparkline...", flush=True)
     args = parse_args()
 
     topax_dir: Path = args.topax_dir
@@ -531,6 +532,7 @@ def main() -> None:
     include_pkgs = [p.upper() for p in parse_csv_list(args.packages)]
     exclude_pkgs = [p.upper() for p in parse_csv_list(args.exclude_packages)]
 
+    print(f"Discovering CSV files under: {topax_dir}", flush=True)
     all_files = discover_files(topax_dir) + discover_tpx_files(topax_dir)
     filtered = [
         m
@@ -549,6 +551,8 @@ def main() -> None:
     grouped = group_files_by_wafer_die_vt(filtered, args.device_type)
     if not grouped:
         raise ValueError("Files matched but no VT flavor could be extracted from structure names.")
+
+    print(f"Found {len(filtered)} matching file(s) across {len(grouped)} wafer(s); rendering...", flush=True)
 
     wafer_lots: dict[int, str] = {}
     for wafer, die_map in grouped.items():

@@ -62,10 +62,12 @@ FILENAME_RE = re.compile(
 # USER CONFIGURATION - defaults you are most likely to edit
 # ---------------------------------------------------------------------------
 
-# Root folder that holds Topax CSVs (scanned recursively).
-DEFAULT_TOPAX_DIR = Path(
-    r"C:\Users\aoberoi\OneDrive - Intel Corporation\1281\WW36\TPX Rework"
-)
+# Root folder that holds Topax CSVs (scanned recursively). Honors TOPAX_DATA_DIR
+# if set, else falls back to the user's Documents\TopaxData (portable across
+# machines/relocations — matches the Extractor GUI's own default output base).
+_ENV_TOPAX_DIR_VAR = "TOPAX_DATA_DIR"
+DEFAULT_TOPAX_DIR = Path(os.environ[_ENV_TOPAX_DIR_VAR]) if os.environ.get(_ENV_TOPAX_DIR_VAR, "").strip() \
+    else Path.home() / "Documents" / "TopaxData"
 
 # Where PNGs (temporary) and the PowerPoint deck are saved.
 DEFAULT_OUTPUT_DIR = DEFAULT_TOPAX_DIR / "topax_idvg_output"
@@ -1207,6 +1209,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    print("Starting topax_idvg_plotter...", flush=True)
     args = parse_args()
 
     topax_dir: Path = args.topax_dir
@@ -1234,6 +1237,7 @@ def main() -> None:
     #    Both Topax (filename-encoded structure) and TPX (Device-column
     #    encoded structure) layouts are scanned; each file only matches one.
     # ------------------------------------------------------------------
+    print(f"Discovering CSV files under: {topax_dir}", flush=True)
     all_files = discover_files(topax_dir) + discover_tpx_files(topax_dir)
     filtered_files = [
         meta
@@ -1256,6 +1260,8 @@ def main() -> None:
 
     if not filtered_files:
         raise ValueError("No files matched your lot/wafer/structure/package filters.")
+
+    print(f"Found {len(filtered_files)} matching file(s); rendering...", flush=True)
 
     # ------------------------------------------------------------------
     # 3) Resolve output paths. PPT filename is timestamped by default
