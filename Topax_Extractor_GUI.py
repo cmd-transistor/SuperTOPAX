@@ -46,6 +46,42 @@ _DATA_TYPES    = ['SML', 'VBD', 'FLICKER_NOISE','CAP_SWEEP_VATCTARGET_NOSTRAY', 
 _IDVG_PLOTTER_SCRIPT     = Path(__file__).with_name('topax_idvg_plotter.py')
 _WAFER_SPARKLINE_SCRIPT  = Path(__file__).with_name('topax_wafer_sparkline.py')
 
+# Default output base folder: honor TOPAX_OUTPUT_DIR if set, else the user's
+# Documents folder.  Never defaults to a network share — see _is_network_path().
+_ENV_OUTPUT_DIR_VAR  = 'TOPAX_OUTPUT_DIR'
+_DEFAULT_OUTPUT_BASE = Path(os.environ[_ENV_OUTPUT_DIR_VAR]) if os.environ.get(_ENV_OUTPUT_DIR_VAR, '').strip() \
+    else Path.home() / 'Documents' / 'TopaxData'
+
+
+def _is_network_path(path: str) -> bool:
+    """True if `path` is a UNC path or resolves to a mapped network drive."""
+    p = path.strip()
+    if not p:
+        return False
+    if p.startswith('\\\\') or p.startswith('//'):
+        return True
+    drive, _ = os.path.splitdrive(p)
+    if drive and os.name == 'nt':
+        try:
+            import ctypes
+            DRIVE_REMOTE = 4
+            if ctypes.windll.kernel32.GetDriveTypeW(f"{drive}\\") == DRIVE_REMOTE:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _list_subdirs(path: str) -> list:
+    """Sorted immediate subfolder names of `path`, or [] if inaccessible."""
+    try:
+        return sorted(
+            name for name in os.listdir(path)
+            if os.path.isdir(os.path.join(path, name))
+        )
+    except OSError:
+        return []
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Data-access helpers
@@ -246,6 +282,7 @@ class _App:
         self._log_q    = queue.Queue()
         self._stop     = threading.Event()
         self._log_file = None          # set while a run is active
+        self._out_auto_value = ""      # last value we auto-computed for the Output Folder
 
         self._build_widgets()
         self._poll_log()
@@ -283,33 +320,53 @@ class _App:
         # ── Test type (EOL / Inline)
         lbl("Test Type *", 2)
         self._v_mode = tk.StringVar(value='EOL')
-        ttk.Combobox(frm, textvariable=self._v_mode,
+        cmb_mode = ttk.Combobox(frm, textvariable=self._v_mode,
                      values=['EOL', 'Inline'], width=10,
-                     state='readonly').grid(row=2, column=1, sticky=tk.W, **p)
+                     state='readonly')
+        cmb_mode.grid(row=2, column=1, sticky=tk.W, **p)
+        cmb_mode.bind('<<ComboboxSelected>>', self._on_test_type_changed)
+
+        # ── Process Node (scanned from the server root; optional override)
+        lbl("Process Node", 3)
+        self._v_proc_node = tk.StringVar()
+        self._cmb_proc_node = ttk.Combobox(frm, textvariable=self._v_proc_node, width=16)
+        self._cmb_proc_node.grid(row=3, column=1, sticky=tk.W, **p)
+        self._cmb_proc_node.bind('<<ComboboxSelected>>', self._on_process_node_changed)
+        self._cmb_proc_node.bind('<FocusOut>', self._on_process_node_changed)
+        hint("Optional. Leave blank to auto-detect per lot from the database.", 3)
+
+        # ── Test Chip (scanned after Process Node is entered/selected)
+        lbl("Test Chip", 4)
+        self._v_test_chip = tk.StringVar()
+        self._cmb_test_chip = ttk.Combobox(frm, textvariable=self._v_test_chip, width=16, state='disabled')
+        self._cmb_test_chip.grid(row=4, column=1, sticky=tk.W, **p)
+        self._cmb_test_chip.bind('<<ComboboxSelected>>', lambda e: self._refresh_auto_output_dir())
+        hint("Populated from the selected Process Node's folder. Optional.", 4)
 
         # ── Data pull type
-        lbl("Data Type *", 3)
+        lbl("Data Type *", 5)
         self._v_dtype = tk.StringVar(value='SML')
         ttk.Combobox(frm, textvariable=self._v_dtype,
                      values=_DATA_TYPES, width=16,
-                     state='readonly').grid(row=3, column=1, sticky=tk.W, **p)
+                     state='readonly').grid(row=5, column=1, sticky=tk.W, **p)
 
         # ── Structure pattern(s)
-        lbl("Structure(s) *", 4)
+        lbl("Structure(s) *", 6)
         self._v_struct = tk.StringVar(value='*.tgz')
         ttk.Entry(frm, textvariable=self._v_struct, width=56).grid(
-            row=4, column=1, columnspan=2, sticky=tk.EW, **p)
+            row=6, column=1, columnspan=2, sticky=tk.EW, **p)
         hint("Comma-separated for multiple.  Default: *.tgz\n"
              "e.g.  *_PRE_SORT_ROSN-144-50*M3WAC*tgz, *_PRE_SORT_ROSP-144-50*M3WAC*tgz\n"
              "TPX: filename is the same for every die (e.g. _CMOS_UNI_ACDOE27_TPX_IDVG_VD.tgz) — "
              "leave as *.tgz; structures are split by the 'Device' column inside the CSV, not the filename.",
-             5, col=1, span=2)
+             7, col=1, span=2)
 
         # ── Output folder
-        lbl("Output Folder *", 7)
+        lbl("Output Folder *", 8)
         self._v_out = tk.StringVar()
+        self._v_lot.trace_add('write', lambda *a: self._refresh_auto_output_dir())
         frm_out = ttk.Frame(frm)
-        frm_out.grid(row=7, column=1, columnspan=2, sticky=tk.W, **p)
+        frm_out.grid(row=8, column=1, columnspan=2, sticky=tk.W, **p)
         ttk.Entry(frm_out, textvariable=self._v_out, width=72).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(frm_out, text="Browse…", command=self._browse).pack(
             side=tk.LEFT, padx=4)
@@ -320,7 +377,7 @@ class _App:
             frm,
             text="Auto-create sub-folders:  {Process}\\{Lot7}\\Topax\\",
             variable=self._v_subdirs,
-        ).grid(row=8, column=1, columnspan=2, sticky=tk.W, **p)
+        ).grid(row=9, column=1, columnspan=2, sticky=tk.W, **p)
 
         # ── Skip-existing checkbox
         self._v_skip_existing = tk.BooleanVar(value=False)
@@ -328,9 +385,11 @@ class _App:
             frm,
             text="Skip files that already exist in the output folder (don't overwrite)",
             variable=self._v_skip_existing,
-        ).grid(row=9, column=1, columnspan=2, sticky=tk.W, **p)
+        ).grid(row=10, column=1, columnspan=2, sticky=tk.W, **p)
 
         frm.columnconfigure(1, weight=1)
+
+        self._refresh_auto_output_dir()
 
         # ── Buttons ───────────────────────────────────────────────────────────
         frm_btns = ttk.Frame(self.root)
@@ -548,6 +607,57 @@ class _App:
     def _clear_log(self):
         self._log_txt.delete('1.0', tk.END)
 
+    def _current_server(self) -> str:
+        return _EOL_SERVER if self._v_mode.get() == 'EOL' else _INLINE_SERVER
+
+    def _on_test_type_changed(self, _event=None):
+        """Server changed (EOL/Inline): reset Process Node/Test Chip choices."""
+        self._cmb_proc_node['values'] = _list_subdirs(self._current_server())
+        self._v_proc_node.set('')
+        self._v_test_chip.set('')
+        self._cmb_test_chip['values'] = []
+        self._cmb_test_chip.configure(state='disabled')
+
+    def _on_process_node_changed(self, _event=None):
+        """Process Node entered/selected: scan it for Test Chip subfolders."""
+        proc = self._v_proc_node.get().strip()
+        if not proc:
+            self._cmb_test_chip.configure(state='disabled')
+            self._cmb_test_chip['values'] = []
+            self._v_test_chip.set('')
+            self._refresh_auto_output_dir()
+            return
+
+        base = os.path.join(self._current_server(), proc)
+        chips = _list_subdirs(base)
+        self._cmb_test_chip['values'] = chips
+        self._cmb_test_chip.configure(state='readonly' if chips else 'disabled')
+        if self._v_test_chip.get() not in chips:
+            self._v_test_chip.set('')
+        self._refresh_auto_output_dir()
+
+    def _compute_auto_output_dir(self) -> str:
+        lot = self._v_lot.get().strip()
+        proc = self._v_proc_node.get().strip()
+        chip = self._v_test_chip.get().strip()
+        lot_token = re.sub(r'[^A-Za-z0-9_-]+', '_', lot) or 'UnspecifiedLot'
+        parts = [str(_DEFAULT_OUTPUT_BASE)]
+        if proc:
+            parts.append(re.sub(r'[^A-Za-z0-9_-]+', '_', proc))
+        if chip:
+            parts.append(re.sub(r'[^A-Za-z0-9_-]+', '_', chip))
+        parts.append(lot_token)
+        return os.path.join(*parts)
+
+    def _refresh_auto_output_dir(self):
+        """Recompute the default Output Folder, but only overwrite it if the
+        user hasn't since typed something else in that field themselves."""
+        auto_val = self._compute_auto_output_dir()
+        current = self._v_out.get().strip()
+        if not current or current == self._out_auto_value:
+            self._v_out.set(auto_val)
+        self._out_auto_value = auto_val
+
     def _poll_log(self):
         """Drain the log queue into the text widget (≤50 lines per 100 ms tick)."""
         for _ in range(50):
@@ -595,6 +705,18 @@ class _App:
         if errs:
             messagebox.showerror("Missing Input", "\n".join(errs), parent=self.root)
             return
+
+        out_val = self._v_out.get().strip()
+        if _is_network_path(out_val):
+            corrected = self._compute_auto_output_dir()
+            messagebox.showwarning(
+                "Local Storage Required",
+                f"Output folder is on a network location:\n{out_val}\n\n"
+                f"Data must be saved locally. Using instead:\n{corrected}",
+                parent=self.root,
+            )
+            self._v_out.set(corrected)
+            self._out_auto_value = corrected
 
         self._btn_run.configure(state=tk.DISABLED)
         self._btn_stop.configure(state=tk.NORMAL)
@@ -692,6 +814,9 @@ class _App:
         out_base     = self._v_out.get().strip()
         create_subs  = self._v_subdirs.get()
         server       = _EOL_SERVER if mode == 'EOL' else _INLINE_SERVER
+        proc_node    = self._v_proc_node.get().strip()
+        test_chip    = self._v_test_chip.get().strip()
+        manual_override = bool(proc_node) and bool(test_chip)
 
         sep = '─' * 58
 
@@ -701,26 +826,38 @@ class _App:
         self._log(f"Mode         : {mode}   Data type: {dtype}")
         self._log(f"Structure(s) : {struct_pats}")
         self._log(f"Output base  : {out_base}")
+        if manual_override:
+            self._log(f"Process Node / Test Chip (manual): {proc_node} / {test_chip}")
         self._log(sep)
 
-        # ── 1. Query PyUber ───────────────────────────────────────────────────
-        self._set_ui(pct=5, status="Querying database…")
-        self._log("Step 1 — Querying PyUber for lot / process info…")
+        # ── 1. Resolve lot -> (process, test chip) ───────────────────────────
+        if manual_override:
+            self._set_ui(pct=5, status="Using manual Process Node / Test Chip…")
+            self._log("Step 1 — Manual Process Node / Test Chip override (skipping PyUber lookup)…")
+            raw_lots = [t.strip() for t in lot_input.split(',') if t.strip() and '*' not in t and '?' not in t]
+            if not raw_lots:
+                self._log("  No exact Lot ID(s) given — manual override needs literal lot IDs (no wildcards).")
+                self._set_ui(pct=0, status="No exact lot IDs for manual override")
+                return
+            lot_map = {lot: (proc_node, test_chip) for lot in raw_lots}
+        else:
+            self._set_ui(pct=5, status="Querying database…")
+            self._log("Step 1 — Querying PyUber for lot / process info…")
 
-        try:
-            lot_map = query_lot_info(lot_patterns, operations)
-        except Exception as exc:
-            self._log(f"  ERROR: {exc}")
-            self._set_ui(pct=0, status="Database query failed")
-            return
+            try:
+                lot_map = query_lot_info(lot_patterns, operations)
+            except Exception as exc:
+                self._log(f"  ERROR: {exc}")
+                self._set_ui(pct=0, status="Database query failed")
+                return
 
-        if not lot_map:
-            self._log(
-                "  No lots found.  Check Lot ID, Operation, VPN, and "
-                "database access."
-            )
-            self._set_ui(pct=0, status="No lots found")
-            return
+            if not lot_map:
+                self._log(
+                    "  No lots found.  Check Lot ID, Operation, VPN, and "
+                    "database access."
+                )
+                self._set_ui(pct=0, status="No lots found")
+                return
 
         self._log(f"  {len(lot_map)} lot(s) found: {sorted(lot_map.keys())}")
 
