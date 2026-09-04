@@ -342,7 +342,8 @@ class _App:
         self._cmb_test_chip = ttk.Combobox(frm, textvariable=self._v_test_chip, width=16, state='disabled')
         self._cmb_test_chip.grid(row=4, column=1, sticky=tk.W, **p)
         self._cmb_test_chip.bind('<<ComboboxSelected>>', lambda e: self._refresh_auto_output_dir())
-        hint("Populated from the selected Process Node's folder. Optional.", 4)
+        ttk.Button(frm, text="List Lot IDs", command=self._on_list_lots).grid(
+            row=4, column=2, sticky=tk.W, **p)
 
         # ── Data pull type
         lbl("Data Type *", 5)
@@ -391,6 +392,7 @@ class _App:
         frm.columnconfigure(1, weight=1)
 
         self._refresh_auto_output_dir()
+        self._on_test_type_changed()   # populate Process Node (and cascade to Test Chip) on startup
 
         # ── Buttons ───────────────────────────────────────────────────────────
         frm_btns = ttk.Frame(self.root)
@@ -618,15 +620,31 @@ class _App:
         return _EOL_SERVER if self._v_mode.get() == 'EOL' else _INLINE_SERVER
 
     def _on_test_type_changed(self, _event=None):
-        """Server changed (EOL/Inline): reset Process Node/Test Chip choices."""
-        self._cmb_proc_node['values'] = _list_subdirs(self._current_server())
-        self._v_proc_node.set('')
-        self._v_test_chip.set('')
-        self._cmb_test_chip['values'] = []
-        self._cmb_test_chip.configure(state='disabled')
+        """Server changed (EOL/Inline, or startup): rescan Process Node choices
+        in the background and auto-select the first one found."""
+        server = self._current_server()
+
+        def _work():
+            values = _list_subdirs(server)
+            self.root.after(0, lambda: self._apply_proc_node_values(values))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _apply_proc_node_values(self, values: list):
+        self._cmb_proc_node['values'] = values
+        if values:
+            self._v_proc_node.set(values[0])
+            self._on_process_node_changed()
+        else:
+            self._v_proc_node.set('')
+            self._v_test_chip.set('')
+            self._cmb_test_chip['values'] = []
+            self._cmb_test_chip.configure(state='disabled')
+            self._refresh_auto_output_dir()
 
     def _on_process_node_changed(self, _event=None):
-        """Process Node entered/selected: scan it for Test Chip subfolders."""
+        """Process Node entered/selected: scan it (in the background) for Test
+        Chip subfolders and auto-select the first one found."""
         proc = self._v_proc_node.get().strip()
         if not proc:
             self._cmb_test_chip.configure(state='disabled')
@@ -635,13 +653,46 @@ class _App:
             self._refresh_auto_output_dir()
             return
 
-        base = os.path.join(self._current_server(), proc)
-        chips = _list_subdirs(base)
+        server = self._current_server()
+
+        def _work():
+            chips = _list_subdirs(os.path.join(server, proc))
+            self.root.after(0, lambda: self._apply_test_chip_values(chips))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _apply_test_chip_values(self, chips: list):
         self._cmb_test_chip['values'] = chips
         self._cmb_test_chip.configure(state='readonly' if chips else 'disabled')
-        if self._v_test_chip.get() not in chips:
+        if chips and self._v_test_chip.get() not in chips:
+            self._v_test_chip.set(chips[0])
+        elif not chips:
             self._v_test_chip.set('')
         self._refresh_auto_output_dir()
+
+    def _on_list_lots(self):
+        """List lot-ID folders under the selected Process Node / Test Chip /
+        Data Type into the Run Log."""
+        proc = self._v_proc_node.get().strip()
+        chip = self._v_test_chip.get().strip()
+        dtype = self._v_dtype.get().strip()
+        if not proc or not chip:
+            messagebox.showinfo("List Lot IDs", "Select a Process Node and Test Chip first.", parent=self.root)
+            return
+
+        base = os.path.join(self._current_server(), proc, chip, dtype)
+
+        def _work():
+            self._log(f"\nListing lot folders under: {base}")
+            lots = _list_subdirs(base)
+            if not lots:
+                self._log("  (no lot folders found, or path inaccessible)")
+            else:
+                for lot in lots:
+                    self._log(f"    {lot}")
+                self._log(f"  {len(lots)} lot folder(s) found.")
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _compute_auto_output_dir(self) -> str:
         lot = self._v_lot.get().strip()
@@ -683,8 +734,9 @@ class _App:
                 lot_patterns = _parse_lot_patterns(lot_input)
                 lot_map = query_lot_info(lot_patterns, operations)
             except Exception as exc:
-                self._log(f"Auto-detect failed: {exc}")
-                self.root.after(0, lambda: messagebox.showerror("Auto-detect Failed", str(exc), parent=self.root))
+                msg = str(exc)
+                self._log(f"Auto-detect failed: {msg}")
+                self.root.after(0, lambda msg=msg: messagebox.showerror("Auto-detect Failed", msg, parent=self.root))
                 return
             if not lot_map:
                 self._log("Auto-detect: no lots found for that Lot ID / Operation(s).")
