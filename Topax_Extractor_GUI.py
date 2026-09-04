@@ -420,6 +420,12 @@ class _App:
         self._build_idvg_tab(tab_idvg)
         self._build_sparkline_tab(tab_spark)
 
+        # Auto-fill the Plot tabs' Topax Dir / Output Dir from the Extractor's
+        # Output Folder, unless the user has since typed something else there.
+        self._plot_dir_auto_value = ""
+        self._v_out.trace_add('write', self._sync_plot_dirs_from_extractor)
+        self._sync_plot_dirs_from_extractor()
+
         # ── Status bar ────────────────────────────────────────────────────────
         frm_status = ttk.Frame(self.root)
         frm_status.pack(fill=tk.X, padx=10, pady=(0, 2))
@@ -711,6 +717,20 @@ class _App:
                 parent=self.root,
             )
 
+    def _sync_plot_dirs_from_extractor(self, *_args):
+        """Propagate the Extractor's Output Folder into the Plot tabs' Topax
+        Dir / Output Dir fields, unless the user has typed something else there."""
+        out_val = self._v_out.get().strip()
+        if not out_val:
+            return
+        prev_auto = self._plot_dir_auto_value
+        for var in (self._idvg_topax_dir, self._idvg_output_dir,
+                    self._spark_topax_dir, self._spark_output_dir):
+            cur = var.get().strip()
+            if not cur or cur == prev_auto:
+                var.set(out_val)
+        self._plot_dir_auto_value = out_val
+
     def _poll_log(self):
         """Drain the log queue into the text widget (≤50 lines per 100 ms tick)."""
         for _ in range(50):
@@ -789,7 +809,8 @@ class _App:
 
     def _on_run_plot_script(self, script_path: Path, button: ttk.Button, build_args):
         """Launch a sibling plotting script as an independent subprocess with
-        GUI-supplied CLI args, streaming its stdout/stderr into the Run Log."""
+        GUI-supplied CLI args, streaming its stdout/stderr into the Run Log
+        and driving the shared progress bar from its 'PROGRESS n/total' lines."""
         if not script_path.exists():
             messagebox.showerror("Script Not Found", f"Could not find:\n{script_path}", parent=self.root)
             return
@@ -803,6 +824,7 @@ class _App:
         button.configure(state=tk.DISABLED)
         cmd = [sys.executable, str(script_path)] + extra_args
         self._log(f"\n{'─' * 58}\nRunning: {' '.join(cmd)}\n{'─' * 58}")
+        self._set_ui(pct=0.0, status=f"Running {script_path.name}…")
 
         def _stream():
             try:
@@ -812,9 +834,17 @@ class _App:
                     text=True, bufsize=1, cwd=str(script_path.parent),
                 )
                 for line in proc.stdout:
-                    self._log(line.rstrip('\n'))
+                    line = line.rstrip('\n')
+                    progress_match = re.match(r'^PROGRESS (\d+)/(\d+)$', line.strip())
+                    if progress_match:
+                        done, total = int(progress_match.group(1)), int(progress_match.group(2))
+                        pct = (done / total * 100) if total else 0
+                        self._set_ui(pct=pct, status=f"{script_path.name}: {done} / {total}…")
+                        continue
+                    self._log(line)
                 proc.wait()
                 self._log(f"{script_path.name} finished (exit code {proc.returncode}).")
+                self._set_ui(pct=100.0, status=f"{script_path.name} finished (exit code {proc.returncode})")
             except Exception as exc:
                 self._log(f"ERROR launching {script_path.name}: {exc}")
             finally:

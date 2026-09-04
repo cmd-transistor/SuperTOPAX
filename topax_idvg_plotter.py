@@ -1303,29 +1303,30 @@ def main() -> None:
 
     workers = max(1, int(args.workers))
     file_meta_by_plot: dict[Path, FileMeta] = {}
+    total_files = len(filtered_files)
 
     # ------------------------------------------------------------------
     # 5) Render one PNG per CSV, serially or in a process pool.
     # ------------------------------------------------------------------
     if workers == 1:
-        for meta in filtered_files:
+        for idx, meta in enumerate(filtered_files):
             row = render_one_file(meta, cfg)
-            if row is None:
-                continue
-            summary_rows.append(row)
-            plot_path = Path(row["plot_path"])
-            file_meta_by_plot[plot_path] = meta
-            image_entries.append((meta, plot_path))
-    else:
-        tasks = [(meta, cfg) for meta in filtered_files]
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            for meta, row in zip(filtered_files, pool.map(_worker, tasks, chunksize=4)):
-                if row is None:
-                    continue
+            if row is not None:
                 summary_rows.append(row)
                 plot_path = Path(row["plot_path"])
                 file_meta_by_plot[plot_path] = meta
                 image_entries.append((meta, plot_path))
+            print(f"PROGRESS {idx + 1}/{total_files}", flush=True)
+    else:
+        tasks = [(meta, cfg) for meta in filtered_files]
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for idx, (meta, row) in enumerate(zip(filtered_files, pool.map(_worker, tasks, chunksize=4))):
+                if row is not None:
+                    summary_rows.append(row)
+                    plot_path = Path(row["plot_path"])
+                    file_meta_by_plot[plot_path] = meta
+                    image_entries.append((meta, plot_path))
+                print(f"PROGRESS {idx + 1}/{total_files}", flush=True)
 
     if not image_entries:
         raise ValueError("Files matched filters, but no data points passed VDS/Sweep filters.")

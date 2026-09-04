@@ -581,14 +581,17 @@ def main() -> None:
     wafer_images: list[tuple[int, Path]] = []
 
     tasks = [(wafer, die_map, cfg) for wafer, die_map in grouped.items()]
+    total_tasks = len(tasks)
 
     if workers == 1 or len(tasks) == 1:
-        for t in tasks:
+        for idx, t in enumerate(tasks):
             wafer_images.append(_render_worker(t))
+            print(f"PROGRESS {idx + 1}/{total_tasks}", flush=True)
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            for result in pool.map(_render_worker, tasks):
+            for idx, result in enumerate(pool.map(_render_worker, tasks)):
                 wafer_images.append(result)
+                print(f"PROGRESS {idx + 1}/{total_tasks}", flush=True)
 
     saved_ppt = build_ppt(wafer_images, wafer_lots, ppt_path, cfg)
 
