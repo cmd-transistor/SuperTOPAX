@@ -333,7 +333,8 @@ class _App:
         self._cmb_proc_node.grid(row=3, column=1, sticky=tk.W, **p)
         self._cmb_proc_node.bind('<<ComboboxSelected>>', self._on_process_node_changed)
         self._cmb_proc_node.bind('<FocusOut>', self._on_process_node_changed)
-        hint("Optional. Leave blank to auto-detect per lot from the database.", 3)
+        ttk.Button(frm, text="Auto-detect from Lot ID", command=self._on_lookup_from_lot).grid(
+            row=3, column=2, sticky=tk.W, **p)
 
         # ── Test Chip (scanned after Process Node is entered/selected)
         lbl("Test Chip", 4)
@@ -657,6 +658,58 @@ class _App:
         if not current or current == self._out_auto_value:
             self._v_out.set(auto_val)
         self._out_auto_value = auto_val
+
+    def _on_lookup_from_lot(self):
+        """Query PyUber for the current Lot ID(s)/Operation(s) and auto-fill
+        Process Node / Test Chip from the result."""
+        lot_input = self._v_lot.get().strip()
+        ops_raw = self._v_op.get().replace(';', ',')
+        operations = [o.strip() for o in ops_raw.split(',') if o.strip()]
+        if not lot_input or not operations:
+            messagebox.showinfo("Auto-detect", "Enter Lot ID and Operation(s) first.", parent=self.root)
+            return
+        if not _PYUBER_OK:
+            messagebox.showerror("PyUber Not Found", "PyUber is not installed; cannot auto-detect.", parent=self.root)
+            return
+
+        def _work():
+            try:
+                lot_patterns = _parse_lot_patterns(lot_input)
+                lot_map = query_lot_info(lot_patterns, operations)
+            except Exception as exc:
+                self._log(f"Auto-detect failed: {exc}")
+                self.root.after(0, lambda: messagebox.showerror("Auto-detect Failed", str(exc), parent=self.root))
+                return
+            if not lot_map:
+                self._log("Auto-detect: no lots found for that Lot ID / Operation(s).")
+                self.root.after(0, lambda: messagebox.showwarning(
+                    "Auto-detect", "No lots found in the database for that Lot ID / Operation(s).", parent=self.root))
+                return
+            self.root.after(0, lambda: self._apply_lookup_result(lot_map))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _apply_lookup_result(self, lot_map: dict):
+        combos = sorted(set(lot_map.values()))
+        for lot, (proc, chip) in sorted(lot_map.items()):
+            self._log(f"  Auto-detected: {lot} -> {proc} / {chip}")
+        if len(combos) == 1:
+            proc, chip = combos[0]
+            self._cmb_proc_node['values'] = [proc]
+            self._v_proc_node.set(proc)
+            self._cmb_test_chip['values'] = [chip]
+            self._cmb_test_chip.configure(state='readonly')
+            self._v_test_chip.set(chip)
+            self._refresh_auto_output_dir()
+        else:
+            procs = sorted({c[0] for c in combos})
+            self._cmb_proc_node['values'] = procs
+            messagebox.showinfo(
+                "Multiple Matches",
+                f"Found {len(combos)} different Process Node / Test Chip combinations across the "
+                "matched lots (see Run Log). Pick manually from the Process Node dropdown.",
+                parent=self.root,
+            )
 
     def _poll_log(self):
         """Drain the log queue into the text widget (≤50 lines per 100 ms tick)."""
