@@ -13,6 +13,7 @@ import io
 import os
 import glob
 import queue
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -345,24 +346,19 @@ class _App:
         self._btn_clr.pack(side=tk.LEFT, padx=12)
 
         # ── Plots (independent of the extraction settings above) ─────────────
-        frm_plots = ttk.LabelFrame(self.root, text="Plots", padding=6)
-        frm_plots.pack(fill=tk.X, padx=10, pady=(0, 4))
+        frm_plots_outer = ttk.LabelFrame(self.root, text="Plots", padding=6)
+        frm_plots_outer.pack(fill=tk.X, padx=10, pady=(0, 4))
 
-        self._btn_plot_idvg = ttk.Button(
-            frm_plots, text="▶  Plot IDVG",
-            command=lambda: self._on_run_plot_script(_IDVG_PLOTTER_SCRIPT, self._btn_plot_idvg),
-        )
-        self._btn_plot_sparkline = ttk.Button(
-            frm_plots, text="▶  Wafer Sparkline",
-            command=lambda: self._on_run_plot_script(_WAFER_SPARKLINE_SCRIPT, self._btn_plot_sparkline),
-        )
-        self._btn_plot_idvg.pack(side=tk.LEFT, padx=(0, 4))
-        self._btn_plot_sparkline.pack(side=tk.LEFT, padx=4)
-        ttk.Label(
-            frm_plots,
-            text="Each runs independently with its own settings (edit the constants/CLI in that script).",
-            foreground='grey',
-        ).pack(side=tk.LEFT, padx=12)
+        nb = ttk.Notebook(frm_plots_outer)
+        nb.pack(fill=tk.X)
+
+        tab_idvg = ttk.Frame(nb, padding=6)
+        tab_spark = ttk.Frame(nb, padding=6)
+        nb.add(tab_idvg, text="Plot IDVG")
+        nb.add(tab_spark, text="Wafer Sparkline")
+
+        self._build_idvg_tab(tab_idvg)
+        self._build_sparkline_tab(tab_spark)
 
         # ── Status bar ────────────────────────────────────────────────────────
         frm_status = ttk.Frame(self.root)
@@ -387,6 +383,160 @@ class _App:
         self._log_txt.pack(fill=tk.BOTH, expand=True)
         # Prevent accidental edits while keeping copy/select
         self._log_txt.bind("<Key>", lambda e: "break")
+
+    # ── Plot tab construction ─────────────────────────────────────────────────
+
+    def _browse_dir_into(self, var: tk.StringVar):
+        d = filedialog.askdirectory(title="Select Folder")
+        if d:
+            var.set(d)
+
+    def _add_path_row(self, parent, label, row, var):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.E, padx=6, pady=2)
+        frm = ttk.Frame(parent)
+        frm.grid(row=row, column=1, columnspan=3, sticky=tk.EW, padx=6, pady=2)
+        ttk.Entry(frm, textvariable=var, width=52).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(frm, text="Browse…", command=lambda: self._browse_dir_into(var)).pack(side=tk.LEFT, padx=4)
+
+    def _add_entry_row(self, parent, label, row, col, var, width=20, hint=None):
+        ttk.Label(parent, text=label).grid(row=row, column=col, sticky=tk.E, padx=6, pady=2)
+        ttk.Entry(parent, textvariable=var, width=width).grid(row=row, column=col + 1, sticky=tk.W, padx=6, pady=2)
+        if hint:
+            ttk.Label(parent, text=hint, foreground='grey').grid(row=row, column=col + 2, sticky=tk.W, padx=6, pady=2)
+
+    def _build_idvg_tab(self, parent):
+        # Leave every field blank by default so topax_idvg_plotter.py's own
+        # module-level defaults are used unless the user overrides them here.
+        self._idvg_topax_dir   = tk.StringVar()
+        self._idvg_output_dir  = tk.StringVar()
+        self._idvg_lot_prefixes = tk.StringVar()
+        self._idvg_wafers      = tk.StringVar()
+        self._idvg_structures  = tk.StringVar()
+        self._idvg_vds         = tk.StringVar()
+        self._idvg_max_files   = tk.StringVar()
+        self._idvg_plot_source = tk.BooleanVar(value=True)
+        self._idvg_plot_gate   = tk.BooleanVar(value=True)
+        self._idvg_plot_body   = tk.BooleanVar(value=True)
+        self._idvg_skip_ppt    = tk.BooleanVar(value=False)
+        self._idvg_extra_args  = tk.StringVar()
+
+        self._add_path_row(parent, "Topax Dir", 0, self._idvg_topax_dir)
+        self._add_path_row(parent, "Output Dir", 1, self._idvg_output_dir)
+        self._add_entry_row(parent, "Lot Prefixes", 2, 0, self._idvg_lot_prefixes, hint="blank = all lots found")
+        self._add_entry_row(parent, "Wafers", 3, 0, self._idvg_wafers, hint="e.g. 250,353  (blank = script default)")
+        self._add_entry_row(parent, "Structures", 4, 0, self._idvg_structures, width=40, hint="exact structure name(s), comma-separated")
+        self._add_entry_row(parent, "|VDS| magnitudes", 5, 0, self._idvg_vds, hint="e.g. 0.65,0.05")
+        self._add_entry_row(parent, "Max files", 6, 0, self._idvg_max_files, width=8, hint="blank = no cap (debug aid)")
+
+        chk_frame = ttk.Frame(parent)
+        chk_frame.grid(row=7, column=0, columnspan=4, sticky=tk.W, padx=6, pady=(4, 2))
+        ttk.Checkbutton(chk_frame, text="Plot Source (Is)", variable=self._idvg_plot_source).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(chk_frame, text="Plot Gate (Ig)", variable=self._idvg_plot_gate).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(chk_frame, text="Plot Body (Ib)", variable=self._idvg_plot_body).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(chk_frame, text="Skip PPT (PNGs + summary only)", variable=self._idvg_skip_ppt).pack(side=tk.LEFT, padx=4)
+
+        self._add_entry_row(parent, "Extra CLI args", 8, 0, self._idvg_extra_args, width=60,
+                             hint="any other --flag from topax_idvg_plotter.py --help")
+
+        self._btn_plot_idvg = ttk.Button(
+            parent, text="▶  Run Plot IDVG",
+            command=lambda: self._on_run_plot_script(_IDVG_PLOTTER_SCRIPT, self._btn_plot_idvg, self._build_idvg_args),
+        )
+        self._btn_plot_idvg.grid(row=9, column=0, columnspan=2, sticky=tk.W, padx=6, pady=(6, 2))
+
+        parent.columnconfigure(1, weight=1)
+
+    def _build_sparkline_tab(self, parent):
+        self._spark_topax_dir   = tk.StringVar()
+        self._spark_output_dir  = tk.StringVar()
+        self._spark_lot_prefixes = tk.StringVar()
+        self._spark_wafers       = tk.StringVar()
+        self._spark_structure_substring = tk.StringVar()
+        self._spark_device_type  = tk.StringVar(value="")
+        self._spark_vds          = tk.StringVar()
+        self._spark_overlay_vt   = tk.BooleanVar(value=True)
+        self._spark_plot_source  = tk.BooleanVar(value=True)
+        self._spark_plot_gate    = tk.BooleanVar(value=True)
+        self._spark_extra_args   = tk.StringVar()
+
+        self._add_path_row(parent, "Topax Dir", 0, self._spark_topax_dir)
+        self._add_path_row(parent, "Output Dir", 1, self._spark_output_dir)
+        self._add_entry_row(parent, "Lot Prefixes", 2, 0, self._spark_lot_prefixes, hint="blank = script default")
+        self._add_entry_row(parent, "Wafers", 3, 0, self._spark_wafers, hint="comma-separated, or 'all'")
+        self._add_entry_row(parent, "Structure substring", 4, 0, self._spark_structure_substring, width=40)
+        ttk.Label(parent, text="Device type").grid(row=5, column=0, sticky=tk.E, padx=6, pady=2)
+        ttk.Combobox(parent, textvariable=self._spark_device_type, values=["", "NS", "PS"], width=6,
+                     state='readonly').grid(row=5, column=1, sticky=tk.W, padx=6, pady=2)
+        self._add_entry_row(parent, "|VDS| magnitude", 6, 0, self._spark_vds, hint="single value, e.g. 0.65")
+
+        chk_frame = ttk.Frame(parent)
+        chk_frame.grid(row=7, column=0, columnspan=4, sticky=tk.W, padx=6, pady=(4, 2))
+        ttk.Checkbutton(chk_frame, text="Overlay VT flavors", variable=self._spark_overlay_vt).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(chk_frame, text="Plot Source (Is)", variable=self._spark_plot_source).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(chk_frame, text="Plot Gate (Ig)", variable=self._spark_plot_gate).pack(side=tk.LEFT, padx=4)
+
+        self._add_entry_row(parent, "Extra CLI args", 8, 0, self._spark_extra_args, width=60,
+                             hint="any other --flag from topax_wafer_sparkline.py --help")
+
+        self._btn_plot_sparkline = ttk.Button(
+            parent, text="▶  Run Wafer Sparkline",
+            command=lambda: self._on_run_plot_script(_WAFER_SPARKLINE_SCRIPT, self._btn_plot_sparkline, self._build_sparkline_args),
+        )
+        self._btn_plot_sparkline.grid(row=9, column=0, columnspan=2, sticky=tk.W, padx=6, pady=(6, 2))
+
+        parent.columnconfigure(1, weight=1)
+
+    def _build_idvg_args(self) -> list:
+        args = []
+        if self._idvg_topax_dir.get().strip():
+            args += ["--topax-dir", self._idvg_topax_dir.get().strip()]
+        if self._idvg_output_dir.get().strip():
+            args += ["--output-dir", self._idvg_output_dir.get().strip()]
+        if self._idvg_lot_prefixes.get().strip():
+            args += ["--lot-prefixes", self._idvg_lot_prefixes.get().strip()]
+        if self._idvg_wafers.get().strip():
+            args += ["--wafers", self._idvg_wafers.get().strip()]
+        if self._idvg_structures.get().strip():
+            args += ["--structures", self._idvg_structures.get().strip()]
+        if self._idvg_vds.get().strip():
+            args += ["--include-vds-magnitudes", self._idvg_vds.get().strip()]
+        if self._idvg_max_files.get().strip():
+            args += ["--max-files", self._idvg_max_files.get().strip()]
+        if not self._idvg_plot_source.get():
+            args.append("--no-plot-both-currents")
+        if not self._idvg_plot_gate.get():
+            args.append("--no-plot-gate-current")
+        if not self._idvg_plot_body.get():
+            args.append("--no-plot-body-current")
+        if self._idvg_skip_ppt.get():
+            args.append("--skip-ppt")
+        args += shlex.split(self._idvg_extra_args.get().strip())
+        return args
+
+    def _build_sparkline_args(self) -> list:
+        args = []
+        if self._spark_topax_dir.get().strip():
+            args += ["--topax-dir", self._spark_topax_dir.get().strip()]
+        if self._spark_output_dir.get().strip():
+            args += ["--output-dir", self._spark_output_dir.get().strip()]
+        if self._spark_lot_prefixes.get().strip():
+            args += ["--lot-prefixes", self._spark_lot_prefixes.get().strip()]
+        if self._spark_wafers.get().strip():
+            args += ["--wafers", self._spark_wafers.get().strip()]
+        if self._spark_structure_substring.get().strip():
+            args += ["--structure-substring", self._spark_structure_substring.get().strip()]
+        if self._spark_device_type.get().strip():
+            args += ["--device-type", self._spark_device_type.get().strip()]
+        if self._spark_vds.get().strip():
+            args += ["--vds-magnitude", self._spark_vds.get().strip()]
+        if not self._spark_overlay_vt.get():
+            args.append("--no-overlay-vt-flavors")
+        if not self._spark_plot_source.get():
+            args.append("--no-plot-source-current")
+        if not self._spark_plot_gate.get():
+            args.append("--no-plot-gate-current")
+        args += shlex.split(self._spark_extra_args.get().strip())
+        return args
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -462,20 +612,27 @@ class _App:
         self._btn_run.configure(state=tk.NORMAL)
         self._btn_stop.configure(state=tk.DISABLED)
 
-    def _on_run_plot_script(self, script_path: Path, button: ttk.Button):
-        """Launch a sibling plotting script as an independent subprocess,
-        streaming its stdout/stderr into the shared Run Log."""
+    def _on_run_plot_script(self, script_path: Path, button: ttk.Button, build_args):
+        """Launch a sibling plotting script as an independent subprocess with
+        GUI-supplied CLI args, streaming its stdout/stderr into the Run Log."""
         if not script_path.exists():
             messagebox.showerror("Script Not Found", f"Could not find:\n{script_path}", parent=self.root)
             return
 
+        try:
+            extra_args = build_args()
+        except ValueError as exc:
+            messagebox.showerror("Invalid Extra CLI Args", str(exc), parent=self.root)
+            return
+
         button.configure(state=tk.DISABLED)
-        self._log(f"\n{'─' * 58}\nRunning: {script_path.name}\n{'─' * 58}")
+        cmd = [sys.executable, str(script_path)] + extra_args
+        self._log(f"\n{'─' * 58}\nRunning: {' '.join(cmd)}\n{'─' * 58}")
 
         def _stream():
             try:
                 proc = subprocess.Popen(
-                    [sys.executable, str(script_path)],
+                    cmd,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, bufsize=1, cwd=str(script_path.parent),
                 )
